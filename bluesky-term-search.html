@@ -691,6 +691,7 @@
         <div id="quoteOriginal"></div>
         <div id="quoteCount" class="quote-count"></div>
         <div id="quoteResults"></div>
+        <div id="quoteLoadMore"></div>
     </section>
 
     <script>
@@ -707,6 +708,10 @@
         let allQuotes = [];
         let quoteSort = 'likes';
         let isQuoteLoading = false;
+        let quoteCursor = null;
+        let quoteSeenCursors = new Set();
+        let quoteTotalCount = null;
+        let activeQuoteUri = null;
 
         // DOM Elements
         const termsInput = document.getElementById('terms');
@@ -724,6 +729,7 @@
         const quoteOriginalDiv = document.getElementById('quoteOriginal');
         const quoteCountDiv = document.getElementById('quoteCount');
         const quoteResultsDiv = document.getElementById('quoteResults');
+        const quoteLoadMoreDiv = document.getElementById('quoteLoadMore');
 
         // Safe text content setter (prevents XSS)
         function setText(element, text) {
@@ -985,6 +991,26 @@
             return Number.isNaN(time) ? 0 : time;
         }
 
+        function updateQuoteCount() {
+            if (Number.isFinite(quoteTotalCount)) {
+                const total = quoteTotalCount;
+                quoteCountDiv.textContent = `Loaded ${allQuotes.length} of ${total} quote${total !== 1 ? 's' : ''}`;
+                return;
+            }
+            quoteCountDiv.textContent = `Loaded ${allQuotes.length} quote${allQuotes.length !== 1 ? 's' : ''}`;
+        }
+
+        function trackQuoteCursor(nextCursor) {
+            if (!nextCursor) {
+                return null;
+            }
+            if (quoteSeenCursors.has(nextCursor)) {
+                return null;
+            }
+            quoteSeenCursors.add(nextCursor);
+            return nextCursor;
+        }
+
         function parseBlueskyPostUrl(urlString) {
             let parsedUrl;
             try {
@@ -1043,37 +1069,21 @@
             return data.posts[0];
         }
 
-        async function fetchQuotes(atUri) {
-            const quotes = [];
-            let cursor = null;
-            const seenCursors = new Set();
+        async function fetchQuotesPage(atUri, cursor = null) {
+            let url = `${PUBLIC_API}/app.bsky.feed.getQuotes?uri=${encodeURIComponent(atUri)}&limit=100`;
+            if (cursor) {
+                url += `&cursor=${encodeURIComponent(cursor)}`;
+            }
 
-            do {
-                let url = `${PUBLIC_API}/app.bsky.feed.getQuotes?uri=${encodeURIComponent(atUri)}&limit=100`;
-                if (cursor) {
-                    url += `&cursor=${encodeURIComponent(cursor)}`;
-                }
-
-                const response = await fetch(url);
-                if (!response.ok) {
-                    throw new Error(`Quotes fetch failed: ${response.status}`);
-                }
-                const data = await response.json();
-                if (Array.isArray(data.posts)) {
-                    quotes.push(...data.posts);
-                }
-
-                cursor = data.cursor || null;
-                if (cursor) {
-                    if (seenCursors.has(cursor)) {
-                        cursor = null;
-                    } else {
-                        seenCursors.add(cursor);
-                    }
-                }
-            } while (cursor);
-
-            return quotes;
+            const response = await fetch(url);
+            if (!response.ok) {
+                throw new Error(`Quotes fetch failed: ${response.status}`);
+            }
+            const data = await response.json();
+            return {
+                posts: Array.isArray(data.posts) ? data.posts : [],
+                cursor: data.cursor || null
+            };
         }
 
         function sortQuotes(quotes, sortMode) {
@@ -1212,6 +1222,22 @@
             return wrapper;
         }
 
+        function renderQuoteLoadMore() {
+            quoteLoadMoreDiv.textContent = '';
+            if (!quoteCursor) {
+                return;
+            }
+
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.className = 'load-more';
+            button.id = 'quoteLoadMoreBtn';
+            button.textContent = 'Load More Quotes';
+            button.disabled = isQuoteLoading;
+            button.addEventListener('click', loadMoreQuotes);
+            quoteLoadMoreDiv.appendChild(button);
+        }
+
         function renderQuoteResults() {
             quoteResultsDiv.textContent = '';
             if (allQuotes.length === 0) {
@@ -1226,6 +1252,36 @@
             sorted.forEach((quote, index) => {
                 quoteResultsDiv.appendChild(createQuotePostElement(quote, index));
             });
+        }
+
+        async function loadMoreQuotes() {
+            if (isQuoteLoading || !activeQuoteUri || !quoteCursor) {
+                return;
+            }
+
+            isQuoteLoading = true;
+            const loadMoreBtn = document.getElementById('quoteLoadMoreBtn');
+            if (loadMoreBtn) {
+                loadMoreBtn.disabled = true;
+                loadMoreBtn.textContent = 'Loading...';
+            }
+
+            try {
+                const page = await fetchQuotesPage(activeQuoteUri, quoteCursor);
+                if (page.posts.length > 0) {
+                    allQuotes = allQuotes.concat(page.posts);
+                }
+                quoteCursor = trackQuoteCursor(page.cursor);
+                updateQuoteCount();
+                renderQuoteResults();
+                hideQuoteStatus();
+            } catch (error) {
+                console.error('Load more quotes error:', error);
+                showQuoteStatus(`Error loading more quotes: ${error.message}`, 'error');
+            } finally {
+                isQuoteLoading = false;
+                renderQuoteLoadMore();
+            }
         }
 
         async function performQuoteSearch() {
@@ -1244,7 +1300,12 @@
             quoteResultsDiv.textContent = '';
             quoteOriginalDiv.textContent = '';
             quoteCountDiv.textContent = '';
+            quoteLoadMoreDiv.textContent = '';
             allQuotes = [];
+            quoteCursor = null;
+            quoteSeenCursors = new Set();
+            quoteTotalCount = null;
+            activeQuoteUri = null;
 
             updateQuoteURL();
 
@@ -1253,15 +1314,21 @@
                 const did = await fetchDid(actor);
                 const atUri = `at://${did}/app.bsky.feed.post/${postId}`;
 
-                const [post, quotes] = await Promise.all([
+                activeQuoteUri = atUri;
+
+                const [post, quotePage] = await Promise.all([
                     fetchOriginalPost(atUri),
-                    fetchQuotes(atUri)
+                    fetchQuotesPage(atUri)
                 ]);
 
-                allQuotes = quotes;
+                allQuotes = quotePage.posts;
+                quoteCursor = trackQuoteCursor(quotePage.cursor);
+                if (Number.isFinite(post.quoteCount) && post.quoteCount >= allQuotes.length) {
+                    quoteTotalCount = post.quoteCount;
+                }
 
                 quoteOriginalDiv.appendChild(createQuoteOriginalElement(post));
-                quoteCountDiv.textContent = `Found ${quotes.length} quote${quotes.length !== 1 ? 's' : ''}`;
+                updateQuoteCount();
                 quoteTabs.style.display = 'flex';
                 hideQuoteStatus();
                 renderQuoteResults();
@@ -1271,6 +1338,7 @@
             } finally {
                 isQuoteLoading = false;
                 quoteSearchBtn.disabled = false;
+                renderQuoteLoadMore();
             }
         }
 
@@ -1481,6 +1549,7 @@
 
         // Main search function
         async function performSearch() {
+            if (isLoading) return;
             const termsValue = termsInput.value.trim();
             if (!termsValue) {
                 showStatus('Please enter at least one search term.', 'error');
