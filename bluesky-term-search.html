@@ -303,6 +303,52 @@
             box-shadow: 0 0 0 2px var(--focus-ring);
         }
 
+        .new-posts {
+            background: var(--accent-soft);
+            border: 1px solid var(--accent-soft-border);
+            border-radius: 8px;
+            padding: 12px 16px;
+            margin-bottom: 16px;
+        }
+
+        .new-posts-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 12px;
+            flex-wrap: wrap;
+        }
+
+        .new-posts-title {
+            font-weight: 600;
+            color: var(--accent-text);
+        }
+
+        .new-posts-actions {
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+
+        .new-posts-list {
+            margin-top: 12px;
+        }
+
+        .button-secondary {
+            background: var(--surface);
+            color: var(--text);
+            border: 1px solid var(--input-border);
+        }
+
+        .button-secondary:hover {
+            background: var(--surface-hover);
+        }
+
+        .button-small {
+            padding: 6px 12px;
+            font-size: 13px;
+        }
+
         .post-header {
             display: flex;
             align-items: center;
@@ -732,6 +778,7 @@
     </div>
 
     <div id="status" class="status"></div>
+    <div id="newPosts" class="new-posts hidden"></div>
     <div id="results"></div>
 
     <section class="quote-section" id="quoteSection">
@@ -780,6 +827,7 @@
         let lastRefreshAt = null;
         let lastRefreshNewCount = null;
         let lastRefreshError = null;
+        let pendingPosts = [];
         let newPostUris = new Set();
         let clearHighlightsTimeout = null;
         let allQuotes = [];
@@ -796,6 +844,7 @@
         const timeFilterSelect = document.getElementById('timeFilter');
         const searchBtn = document.getElementById('searchBtn');
         const statusDiv = document.getElementById('status');
+        const newPostsDiv = document.getElementById('newPosts');
         const resultsDiv = document.getElementById('results');
         const autoRefreshToggle = document.getElementById('autoRefreshToggle');
         const refreshIntervalSelect = document.getElementById('refreshInterval');
@@ -1691,11 +1740,15 @@
                 noResults.className = 'no-results';
 
                 const p1 = document.createElement('p');
-                p1.textContent = 'No posts found matching your criteria.';
+                p1.textContent = pendingPosts.length > 0
+                    ? 'New posts are waiting above.'
+                    : 'No posts found matching your criteria.';
                 noResults.appendChild(p1);
 
                 const p2 = document.createElement('p');
-                p2.textContent = 'Try different search terms or lower the minimum likes.';
+                p2.textContent = pendingPosts.length > 0
+                    ? 'Use "Add to results" to merge them into the main list.'
+                    : 'Try different search terms or lower the minimum likes.';
                 noResults.appendChild(p2);
 
                 resultsDiv.appendChild(noResults);
@@ -1734,20 +1787,103 @@
             }
         }
 
+        function renderNewPosts() {
+            newPostsDiv.textContent = '';
+            if (pendingPosts.length === 0) {
+                newPostsDiv.classList.add('hidden');
+                return;
+            }
+
+            newPostsDiv.classList.remove('hidden');
+
+            const header = document.createElement('div');
+            header.className = 'new-posts-header';
+
+            const title = document.createElement('div');
+            title.className = 'new-posts-title';
+            title.textContent = `${pendingPosts.length} new post${pendingPosts.length !== 1 ? 's' : ''} from auto-refresh`;
+            header.appendChild(title);
+
+            const actions = document.createElement('div');
+            actions.className = 'new-posts-actions';
+
+            const addBtn = document.createElement('button');
+            addBtn.type = 'button';
+            addBtn.className = 'button-small';
+            addBtn.textContent = 'Add to results';
+            addBtn.addEventListener('click', mergePendingPosts);
+            actions.appendChild(addBtn);
+
+            const dismissBtn = document.createElement('button');
+            dismissBtn.type = 'button';
+            dismissBtn.className = 'button-secondary button-small';
+            dismissBtn.textContent = 'Dismiss';
+            dismissBtn.addEventListener('click', dismissPendingPosts);
+            actions.appendChild(dismissBtn);
+
+            header.appendChild(actions);
+            newPostsDiv.appendChild(header);
+
+            const list = document.createElement('div');
+            list.className = 'new-posts-list';
+            const sorted = [...pendingPosts].sort((a, b) => getPostTimestamp(b) - getPostTimestamp(a));
+            sorted.forEach(post => {
+                list.appendChild(createPostElement(post));
+            });
+            newPostsDiv.appendChild(list);
+        }
+
+        function mergePendingPosts() {
+            if (pendingPosts.length === 0) {
+                return;
+            }
+
+            let combined = deduplicatePosts([...pendingPosts, ...allPosts]);
+            combined = filterByDate(combined, timeFilterHours);
+            combined = filterByLikes(combined, minLikes);
+            allPosts = sortByLikes(combined);
+
+            clearNewPostHighlights();
+            newPostUris = new Set(pendingPosts.map(post => post.uri));
+            scheduleNewPostHighlightClear();
+            pendingPosts = [];
+            renderNewPosts();
+            renderResults();
+        }
+
+        function dismissPendingPosts() {
+            if (pendingPosts.length === 0) {
+                return;
+            }
+            pendingPosts = [];
+            clearNewPostHighlights();
+            renderNewPosts();
+            renderResults();
+        }
+
         async function refreshSearch() {
             if (searchTerms.length === 0) {
                 return 0;
             }
 
-            const existingUris = new Set(allPosts.map(post => post.uri));
+            let trimmed = filterByDate(allPosts, timeFilterHours);
+            trimmed = filterByLikes(trimmed, minLikes);
+            allPosts = sortByLikes(trimmed);
+
+            pendingPosts = filterByDate(pendingPosts, timeFilterHours);
+            pendingPosts = filterByLikes(pendingPosts, minLikes);
+
+            const existingUris = new Set([...allPosts, ...pendingPosts].map(post => post.uri));
             const results = await Promise.all(searchTerms.map(term => fetchLatestPostsForTerm(term)));
-            const latestPosts = deduplicatePosts(results.flat());
+            let latestPosts = deduplicatePosts(results.flat());
+            latestPosts = filterByDate(latestPosts, timeFilterHours);
+            latestPosts = filterByLikes(latestPosts, minLikes);
+
             const newPosts = latestPosts.filter(post => !existingUris.has(post.uri));
 
-            let combined = deduplicatePosts([...latestPosts, ...allPosts]);
-            combined = filterByDate(combined, timeFilterHours);
-            combined = filterByLikes(combined, minLikes);
-            allPosts = sortByLikes(combined);
+            if (newPosts.length > 0) {
+                pendingPosts = deduplicatePosts([...pendingPosts, ...newPosts]);
+            }
 
             clearNewPostHighlights();
             if (newPosts.length > 0) {
@@ -1755,6 +1891,7 @@
                 scheduleNewPostHighlightClear();
             }
 
+            renderNewPosts();
             renderResults();
             return newPosts.length;
         }
@@ -1840,6 +1977,8 @@
             currentCursors = {};
             resultsDiv.textContent = '';
             clearNewPostHighlights();
+            pendingPosts = [];
+            renderNewPosts();
 
             updateSearchURL();
 
