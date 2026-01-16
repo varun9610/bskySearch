@@ -154,6 +154,41 @@
             min-width: 120px;
         }
 
+        .form-group.refresh-status {
+            flex: 2;
+            min-width: 220px;
+        }
+
+        .refresh-row {
+            align-items: flex-end;
+        }
+
+        .checkbox-inline {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 14px;
+            color: var(--muted);
+        }
+
+        .checkbox-inline input {
+            width: 16px;
+            height: 16px;
+        }
+
+        .refresh-meta {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+            font-size: 13px;
+            color: var(--muted-2);
+        }
+
+        .refresh-meta .refresh-state {
+            font-weight: 600;
+            color: var(--text);
+        }
+
         label {
             font-size: 14px;
             font-weight: 500;
@@ -261,6 +296,57 @@
 
         .post:hover {
             box-shadow: 0 2px 8px var(--shadow);
+        }
+
+        .post.new-post {
+            border-color: var(--accent);
+            box-shadow: 0 0 0 2px var(--focus-ring);
+        }
+
+        .new-posts {
+            background: var(--accent-soft);
+            border: 1px solid var(--accent-soft-border);
+            border-radius: 8px;
+            padding: 12px 16px;
+            margin-bottom: 16px;
+        }
+
+        .new-posts-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 12px;
+            flex-wrap: wrap;
+        }
+
+        .new-posts-title {
+            font-weight: 600;
+            color: var(--accent-text);
+        }
+
+        .new-posts-actions {
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+
+        .new-posts-list {
+            margin-top: 12px;
+        }
+
+        .button-secondary {
+            background: var(--surface);
+            color: var(--text);
+            border: 1px solid var(--input-border);
+        }
+
+        .button-secondary:hover {
+            background: var(--surface-hover);
+        }
+
+        .button-small {
+            padding: 6px 12px;
+            font-size: 13px;
         }
 
         .post-header {
@@ -661,11 +747,45 @@
                     <option value="168">7 days</option>
                 </select>
             </div>
+            <div class="form-group small">
+                <label for="sortSelect">Sort</label>
+                <select id="sortSelect">
+                    <option value="top" selected>Top</option>
+                    <option value="latest">Latest</option>
+                </select>
+            </div>
             <button type="button" id="searchBtn">Search</button>
+        </div>
+        <div class="form-row refresh-row">
+            <div class="form-group small">
+                <label for="autoRefreshToggle">Auto-refresh</label>
+                <div class="checkbox-inline">
+                    <input type="checkbox" id="autoRefreshToggle" />
+                    <span>Enable</span>
+                </div>
+            </div>
+            <div class="form-group small">
+                <label for="refreshInterval">Interval</label>
+                <select id="refreshInterval">
+                    <option value="2">2 min</option>
+                    <option value="5" selected>5 min</option>
+                    <option value="10">10 min</option>
+                    <option value="30">30 min</option>
+                </select>
+            </div>
+            <div class="form-group refresh-status">
+                <label>Refresh Status</label>
+                <div class="refresh-meta">
+                    <div id="refreshState" class="refresh-state">Auto-refresh off</div>
+                    <div id="refreshLast">Last updated: --</div>
+                    <div id="refreshNext"></div>
+                </div>
+            </div>
         </div>
     </div>
 
     <div id="status" class="status"></div>
+    <div id="newPosts" class="new-posts hidden"></div>
     <div id="results"></div>
 
     <section class="quote-section" id="quoteSection">
@@ -702,9 +822,22 @@
         let allPosts = [];
         let currentCursors = {};
         let searchTerms = [];
+        let searchSort = 'top';
         let minLikes = 10;
         let timeFilterHours = 24;
         let isLoading = false;
+        let isRefreshing = false;
+        let autoRefreshEnabled = false;
+        let refreshIntervalMs = 5 * 60 * 1000;
+        let refreshTimerId = null;
+        let refreshCountdownId = null;
+        let nextRefreshAt = null;
+        let lastRefreshAt = null;
+        let lastRefreshNewCount = null;
+        let lastRefreshError = null;
+        let pendingPosts = [];
+        let newPostUris = new Set();
+        let clearHighlightsTimeout = null;
         let allQuotes = [];
         let quoteSort = 'likes';
         let isQuoteLoading = false;
@@ -717,9 +850,16 @@
         const termsInput = document.getElementById('terms');
         const minLikesInput = document.getElementById('minLikes');
         const timeFilterSelect = document.getElementById('timeFilter');
+        const sortSelect = document.getElementById('sortSelect');
         const searchBtn = document.getElementById('searchBtn');
         const statusDiv = document.getElementById('status');
+        const newPostsDiv = document.getElementById('newPosts');
         const resultsDiv = document.getElementById('results');
+        const autoRefreshToggle = document.getElementById('autoRefreshToggle');
+        const refreshIntervalSelect = document.getElementById('refreshInterval');
+        const refreshStateDiv = document.getElementById('refreshState');
+        const refreshLastDiv = document.getElementById('refreshLast');
+        const refreshNextDiv = document.getElementById('refreshNext');
         const themeSelect = document.getElementById('themeSelect');
         const quoteForm = document.getElementById('quoteForm');
         const postUrlInput = document.getElementById('postUrl');
@@ -788,6 +928,7 @@
             setQueryParam(params, 'terms', termsInput.value.trim());
             setQueryParam(params, 'minLikes', minLikesInput.value);
             setQueryParam(params, 'time', timeFilterSelect.value !== '24' ? timeFilterSelect.value : '');
+            setQueryParam(params, 'sort', searchSort !== 'top' ? searchSort : '');
             updateURLWithParams(params);
         }
 
@@ -824,6 +965,13 @@
                     timeFilterSelect.value = timeValue;
                 }
             }
+            if (params.get('sort')) {
+                const sortValue = params.get('sort');
+                if (['top', 'latest'].includes(sortValue)) {
+                    sortSelect.value = sortValue;
+                }
+            }
+            searchSort = sortSelect.value === 'latest' ? 'latest' : 'top';
 
             const postParam = params.get('post');
             const sortParam = params.get('sort');
@@ -859,8 +1007,9 @@
         }
 
         // Search posts for a single term (server-side proxy)
-        async function searchTerm(term, cursor = null) {
-            const params = new URLSearchParams({ term });
+        async function searchTerm(term, cursor = null, sort = searchSort) {
+            const sortValue = sort === 'latest' ? 'latest' : 'top';
+            const params = new URLSearchParams({ term, sort: sortValue });
             if (cursor) {
                 params.set('cursor', cursor);
             }
@@ -881,13 +1030,13 @@
         }
 
         // Fetch all posts for a term (with pagination)
-        async function fetchAllPostsForTerm(term, maxPages = 5) {
+        async function fetchAllPostsForTerm(term, maxPages = 5, sort = searchSort) {
             let allTermPosts = [];
             let cursor = null;
             let pages = 0;
 
             while (pages < maxPages) {
-                const data = await searchTerm(term, cursor);
+                const data = await searchTerm(term, cursor, sort);
 
                 if (data.posts && data.posts.length > 0) {
                     const taggedPosts = data.posts.map(post => ({
@@ -904,6 +1053,17 @@
 
             currentCursors[term] = cursor;
             return allTermPosts;
+        }
+
+        async function fetchLatestPostsForTerm(term, sort = searchSort) {
+            const data = await searchTerm(term, null, sort);
+            if (data.posts && data.posts.length > 0) {
+                return data.posts.map(post => ({
+                    ...post,
+                    matchedTerm: term
+                }));
+            }
+            return [];
         }
 
         // Deduplicate posts by URI
@@ -948,9 +1108,15 @@
             });
         }
 
-        // Sort posts by likes (high to low)
-        function sortByLikes(posts) {
-            return posts.sort((a, b) => (b.likeCount || 0) - (a.likeCount || 0));
+        // Sort posts by selected mode
+        function sortPosts(posts, sortMode = searchSort) {
+            const sorted = [...posts];
+            if (sortMode === 'latest') {
+                sorted.sort((a, b) => getPostTimestamp(b) - getPostTimestamp(a));
+                return sorted;
+            }
+            sorted.sort((a, b) => (b.likeCount || 0) - (a.likeCount || 0));
+            return sorted;
         }
 
         // Format relative time
@@ -989,6 +1155,97 @@
             const candidate = post.record?.createdAt || post.indexedAt;
             const time = new Date(candidate).getTime();
             return Number.isNaN(time) ? 0 : time;
+        }
+
+        function formatTime(value) {
+            const date = value instanceof Date ? value : new Date(value);
+            if (Number.isNaN(date.getTime())) return '';
+            return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        }
+
+        function formatDuration(ms) {
+            const totalSeconds = Math.max(0, Math.floor(ms / 1000));
+            const minutes = Math.floor(totalSeconds / 60);
+            const seconds = totalSeconds % 60;
+            if (minutes >= 60) {
+                const hours = Math.floor(minutes / 60);
+                const mins = minutes % 60;
+                return `${hours}h ${mins}m`;
+            }
+            return `${minutes}:${String(seconds).padStart(2, '0')}`;
+        }
+
+        function updateRefreshInterval() {
+            const minutes = parseInt(refreshIntervalSelect.value, 10);
+            refreshIntervalMs = Number.isFinite(minutes) && minutes > 0 ? minutes * 60000 : 5 * 60000;
+        }
+
+        function clearRefreshTimers() {
+            if (refreshTimerId) {
+                clearTimeout(refreshTimerId);
+                refreshTimerId = null;
+            }
+            if (refreshCountdownId) {
+                clearInterval(refreshCountdownId);
+                refreshCountdownId = null;
+            }
+        }
+
+        function updateRefreshMeta() {
+            if (autoRefreshEnabled) {
+                refreshStateDiv.textContent = isRefreshing ? 'Refreshing...' : 'Auto-refresh on';
+            } else {
+                refreshStateDiv.textContent = 'Auto-refresh off';
+            }
+
+            if (lastRefreshError) {
+                refreshLastDiv.textContent = `Last update failed: ${lastRefreshError}`;
+            } else if (lastRefreshAt) {
+                const suffix = Number.isFinite(lastRefreshNewCount)
+                    ? ` (+${lastRefreshNewCount} new)`
+                    : '';
+                refreshLastDiv.textContent = `Last updated: ${formatTime(lastRefreshAt)}${suffix}`;
+            } else {
+                refreshLastDiv.textContent = 'Last updated: --';
+            }
+
+            if (autoRefreshEnabled && nextRefreshAt) {
+                refreshNextDiv.textContent = `Next refresh in ${formatDuration(nextRefreshAt - Date.now())}`;
+            } else {
+                refreshNextDiv.textContent = '';
+            }
+        }
+
+        function scheduleNextRefresh() {
+            clearRefreshTimers();
+            if (!autoRefreshEnabled) {
+                nextRefreshAt = null;
+                updateRefreshMeta();
+                return;
+            }
+            nextRefreshAt = Date.now() + refreshIntervalMs;
+            refreshTimerId = setTimeout(runAutoRefresh, refreshIntervalMs);
+            refreshCountdownId = setInterval(updateRefreshMeta, 1000);
+            updateRefreshMeta();
+        }
+
+        function clearNewPostHighlights() {
+            newPostUris.clear();
+            if (clearHighlightsTimeout) {
+                clearTimeout(clearHighlightsTimeout);
+                clearHighlightsTimeout = null;
+            }
+        }
+
+        function scheduleNewPostHighlightClear() {
+            if (clearHighlightsTimeout) {
+                clearTimeout(clearHighlightsTimeout);
+            }
+            clearHighlightsTimeout = setTimeout(() => {
+                newPostUris.clear();
+                clearHighlightsTimeout = null;
+                renderResults();
+            }, 8000);
         }
 
         function updateQuoteCount() {
@@ -1375,6 +1632,9 @@
 
             const postDiv = document.createElement('div');
             postDiv.className = 'post';
+            if (newPostUris.has(post.uri)) {
+                postDiv.classList.add('new-post');
+            }
 
             // Search terms tags
             const termsDiv = document.createElement('div');
@@ -1504,11 +1764,15 @@
                 noResults.className = 'no-results';
 
                 const p1 = document.createElement('p');
-                p1.textContent = 'No posts found matching your criteria.';
+                p1.textContent = pendingPosts.length > 0
+                    ? 'New posts are waiting above.'
+                    : 'No posts found matching your criteria.';
                 noResults.appendChild(p1);
 
                 const p2 = document.createElement('p');
-                p2.textContent = 'Try different search terms or lower the minimum likes.';
+                p2.textContent = pendingPosts.length > 0
+                    ? 'Use "Add to results" to merge them into the main list.'
+                    : 'Try different search terms or lower the minimum likes.';
                 noResults.appendChild(p2);
 
                 resultsDiv.appendChild(noResults);
@@ -1525,7 +1789,9 @@
             headerDiv.appendChild(countSpan);
 
             const sortSpan = document.createElement('span');
-            sortSpan.textContent = 'Sorted by likes (high to low)';
+            sortSpan.textContent = searchSort === 'latest'
+                ? 'Sorted by time (newest first)'
+                : 'Sorted by likes (high to low)';
             headerDiv.appendChild(sortSpan);
 
             resultsDiv.appendChild(headerDiv);
@@ -1547,6 +1813,171 @@
             }
         }
 
+        function renderNewPosts() {
+            newPostsDiv.textContent = '';
+            if (pendingPosts.length === 0) {
+                newPostsDiv.classList.add('hidden');
+                return;
+            }
+
+            newPostsDiv.classList.remove('hidden');
+
+            const header = document.createElement('div');
+            header.className = 'new-posts-header';
+
+            const title = document.createElement('div');
+            title.className = 'new-posts-title';
+            title.textContent = `${pendingPosts.length} new post${pendingPosts.length !== 1 ? 's' : ''} from auto-refresh`;
+            header.appendChild(title);
+
+            const actions = document.createElement('div');
+            actions.className = 'new-posts-actions';
+
+            const addBtn = document.createElement('button');
+            addBtn.type = 'button';
+            addBtn.className = 'button-small';
+            addBtn.textContent = 'Add to results';
+            addBtn.addEventListener('click', mergePendingPosts);
+            actions.appendChild(addBtn);
+
+            const dismissBtn = document.createElement('button');
+            dismissBtn.type = 'button';
+            dismissBtn.className = 'button-secondary button-small';
+            dismissBtn.textContent = 'Dismiss';
+            dismissBtn.addEventListener('click', dismissPendingPosts);
+            actions.appendChild(dismissBtn);
+
+            header.appendChild(actions);
+            newPostsDiv.appendChild(header);
+
+            const list = document.createElement('div');
+            list.className = 'new-posts-list';
+            const sorted = [...pendingPosts].sort((a, b) => getPostTimestamp(b) - getPostTimestamp(a));
+            sorted.forEach(post => {
+                list.appendChild(createPostElement(post));
+            });
+            newPostsDiv.appendChild(list);
+        }
+
+        function mergePendingPosts() {
+            if (pendingPosts.length === 0) {
+                return;
+            }
+
+            let combined = deduplicatePosts([...pendingPosts, ...allPosts]);
+            combined = filterByDate(combined, timeFilterHours);
+            combined = filterByLikes(combined, minLikes);
+            allPosts = sortPosts(combined);
+
+            clearNewPostHighlights();
+            newPostUris = new Set(pendingPosts.map(post => post.uri));
+            scheduleNewPostHighlightClear();
+            pendingPosts = [];
+            renderNewPosts();
+            renderResults();
+        }
+
+        function dismissPendingPosts() {
+            if (pendingPosts.length === 0) {
+                return;
+            }
+            pendingPosts = [];
+            clearNewPostHighlights();
+            renderNewPosts();
+            renderResults();
+        }
+
+        async function refreshSearch() {
+            if (searchTerms.length === 0) {
+                return 0;
+            }
+
+            let trimmed = filterByDate(allPosts, timeFilterHours);
+            trimmed = filterByLikes(trimmed, minLikes);
+            allPosts = sortPosts(trimmed);
+
+            pendingPosts = filterByDate(pendingPosts, timeFilterHours);
+            pendingPosts = filterByLikes(pendingPosts, minLikes);
+
+            const existingUris = new Set([...allPosts, ...pendingPosts].map(post => post.uri));
+            const results = await Promise.all(searchTerms.map(term => fetchLatestPostsForTerm(term, searchSort)));
+            let latestPosts = deduplicatePosts(results.flat());
+            latestPosts = filterByDate(latestPosts, timeFilterHours);
+            latestPosts = filterByLikes(latestPosts, minLikes);
+
+            const newPosts = latestPosts.filter(post => !existingUris.has(post.uri));
+
+            if (newPosts.length > 0) {
+                pendingPosts = deduplicatePosts([...pendingPosts, ...newPosts]);
+            }
+
+            clearNewPostHighlights();
+            if (newPosts.length > 0) {
+                newPostUris = new Set(newPosts.map(post => post.uri));
+                scheduleNewPostHighlightClear();
+            }
+
+            renderNewPosts();
+            renderResults();
+            return newPosts.length;
+        }
+
+        async function runAutoRefresh() {
+            if (!autoRefreshEnabled) {
+                return;
+            }
+            if (isLoading || isRefreshing) {
+                scheduleNextRefresh();
+                return;
+            }
+            if (searchTerms.length === 0) {
+                autoRefreshEnabled = false;
+                autoRefreshToggle.checked = false;
+                nextRefreshAt = null;
+                lastRefreshError = 'Run a search first.';
+                updateRefreshMeta();
+                clearRefreshTimers();
+                return;
+            }
+
+            isRefreshing = true;
+            lastRefreshError = null;
+            lastRefreshNewCount = null;
+            updateRefreshMeta();
+
+            try {
+                const newCount = await refreshSearch();
+                lastRefreshAt = new Date();
+                lastRefreshNewCount = newCount;
+            } catch (error) {
+                console.error('Auto-refresh error:', error);
+                lastRefreshError = error.message || 'Refresh failed.';
+            } finally {
+                isRefreshing = false;
+                scheduleNextRefresh();
+            }
+        }
+
+        function enableAutoRefresh() {
+            if (searchTerms.length === 0) {
+                autoRefreshToggle.checked = false;
+                lastRefreshError = 'Run a search first.';
+                updateRefreshMeta();
+                return;
+            }
+            autoRefreshEnabled = true;
+            lastRefreshError = null;
+            updateRefreshInterval();
+            scheduleNextRefresh();
+        }
+
+        function disableAutoRefresh() {
+            autoRefreshEnabled = false;
+            clearRefreshTimers();
+            nextRefreshAt = null;
+            updateRefreshMeta();
+        }
+
         // Main search function
         async function performSearch() {
             if (isLoading) return;
@@ -1559,6 +1990,7 @@
             searchTerms = termsValue.split(',').map(t => t.trim()).filter(t => t.length > 0);
             minLikes = parseInt(minLikesInput.value) || 0;
             timeFilterHours = parseInt(timeFilterSelect.value) || 24;
+            searchSort = sortSelect.value === 'latest' ? 'latest' : 'top';
 
             if (searchTerms.length === 0) {
                 showStatus('Please enter at least one search term.', 'error');
@@ -1567,23 +1999,33 @@
 
             isLoading = true;
             searchBtn.disabled = true;
+            let searchCompleted = false;
             allPosts = [];
             currentCursors = {};
             resultsDiv.textContent = '';
+            clearNewPostHighlights();
+            pendingPosts = [];
+            renderNewPosts();
 
             updateSearchURL();
 
             try {
                 showStatus(`Searching for: ${searchTerms.join(', ')}...`, 'loading');
 
-                const promises = searchTerms.map(term => fetchAllPostsForTerm(term));
+                const promises = searchTerms.map(term => fetchAllPostsForTerm(term, 5, searchSort));
                 const results = await Promise.all(promises);
 
                 let combinedPosts = results.flat();
                 combinedPosts = deduplicatePosts(combinedPosts);
                 combinedPosts = filterByDate(combinedPosts, timeFilterHours);
                 combinedPosts = filterByLikes(combinedPosts, minLikes);
-                allPosts = sortByLikes(combinedPosts);
+                allPosts = sortPosts(combinedPosts);
+
+                lastRefreshAt = new Date();
+                lastRefreshNewCount = null;
+                lastRefreshError = null;
+                searchCompleted = true;
+                updateRefreshMeta();
 
                 hideStatus();
                 renderResults();
@@ -1594,6 +2036,9 @@
             } finally {
                 isLoading = false;
                 searchBtn.disabled = false;
+                if (autoRefreshEnabled && searchCompleted) {
+                    scheduleNextRefresh();
+                }
             }
         }
 
@@ -1612,7 +2057,7 @@
                 const promises = searchTerms
                     .filter(term => currentCursors[term])
                     .map(async term => {
-                        const data = await searchTerm(term, currentCursors[term]);
+                        const data = await searchTerm(term, currentCursors[term], searchSort);
                         currentCursors[term] = data.cursor || null;
 
                         if (data.posts && data.posts.length > 0) {
@@ -1632,7 +2077,7 @@
                     combined = deduplicatePosts(combined);
                     combined = filterByDate(combined, timeFilterHours);
                     combined = filterByLikes(combined, minLikes);
-                    allPosts = sortByLikes(combined);
+                    allPosts = sortPosts(combined);
                     renderResults();
                 } else {
                     if (loadMoreBtn) {
@@ -1664,6 +2109,27 @@
                 applyThemePreference('system');
             }
         });
+        autoRefreshToggle.addEventListener('change', (e) => {
+            if (e.target.checked) {
+                enableAutoRefresh();
+            } else {
+                disableAutoRefresh();
+            }
+        });
+        refreshIntervalSelect.addEventListener('change', () => {
+            updateRefreshInterval();
+            if (autoRefreshEnabled) {
+                scheduleNextRefresh();
+            } else {
+                updateRefreshMeta();
+            }
+        });
+        sortSelect.addEventListener('change', () => {
+            searchSort = sortSelect.value === 'latest' ? 'latest' : 'top';
+            if (autoRefreshEnabled) {
+                scheduleNextRefresh();
+            }
+        });
         quoteTabs.addEventListener('click', (e) => {
             if (!e.target.classList.contains('quote-tab')) return;
             const nextSort = e.target.dataset.sort;
@@ -1690,6 +2156,8 @@
         // Initialize
         initTheme();
         initFromURL();
+        updateRefreshInterval();
+        updateRefreshMeta();
     </script>
 </body>
 
