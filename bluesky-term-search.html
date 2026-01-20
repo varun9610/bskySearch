@@ -770,6 +770,12 @@
             text-decoration: underline;
         }
 
+        .thread-link:disabled {
+            color: var(--muted);
+            cursor: not-allowed;
+            text-decoration: none;
+        }
+
         .thread-loading {
             color: var(--muted);
             font-size: 14px;
@@ -1797,17 +1803,36 @@
             return container;
         }
 
+        function removeThreadContexts(postElement) {
+            let previous = postElement.previousElementSibling;
+            let removed = false;
+
+            while (previous?.classList.contains('thread-context')) {
+                const toRemove = previous;
+                previous = previous.previousElementSibling;
+                toRemove.remove();
+                removed = true;
+            }
+
+            return removed;
+        }
+
         async function toggleThread(post, postElement) {
-            const existingContext = postElement.previousElementSibling;
-            if (existingContext?.classList.contains('thread-context')) {
-                existingContext.remove();
-                const link = postElement.querySelector('.thread-link');
-                if (link) link.textContent = 'View Thread';
+            const link = postElement.querySelector('.thread-link');
+            if (!link) return;
+
+            if (link.dataset.loading === 'true') {
                 return;
             }
 
-            const link = postElement.querySelector('.thread-link');
-            if (link) link.textContent = 'Loading...';
+            if (removeThreadContexts(postElement)) {
+                link.textContent = 'View Thread';
+                return;
+            }
+
+            link.dataset.loading = 'true';
+            link.disabled = true;
+            link.textContent = 'Loading...';
 
             try {
                 const threadData = await fetchPostThread(post.uri);
@@ -1823,13 +1848,16 @@
 
                 const contextElement = createThreadContextElement(parents);
                 postElement.parentNode.insertBefore(contextElement, postElement);
-                if (link) link.textContent = 'Hide Thread';
+                link.textContent = 'Hide Thread';
             } catch (error) {
                 console.error('Thread fetch error:', error);
-                if (link) link.textContent = 'Failed to load thread';
+                link.textContent = 'Failed to load thread';
                 setTimeout(() => {
-                    if (link) link.textContent = 'View Thread';
+                    link.textContent = 'View Thread';
                 }, 2000);
+            } finally {
+                link.dataset.loading = 'false';
+                link.disabled = false;
             }
         }
 
