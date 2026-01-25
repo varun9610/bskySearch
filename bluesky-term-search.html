@@ -1017,6 +1017,15 @@
         const SEARCH_API = '/api/search';
         const INITIAL_RENDER_LIMIT = 200;
         const RENDER_STEP = 100;
+        const SEARCH_DEBOUNCE_MS = 300;
+        const INITIAL_MAX_PAGES = 2;
+        const SEARCH_CACHE_TTL_MS = 30000;
+
+        // DID cache to avoid duplicate lookups
+        const didCache = new Map();
+        // Search results cache: key -> { data, timestamp }
+        const searchCache = new Map();
+        let searchDebounceTimer = null;
 
         // State
         let allPosts = [];
@@ -1028,6 +1037,7 @@
         let timeFilterHours = 24;
         let isLoading = false;
         let isRefreshing = false;
+        let pendingSearch = false;
         let renderLimit = INITIAL_RENDER_LIMIT;
         let autoRefreshEnabled = false;
         let refreshIntervalMs = 5 * 60 * 1000;
@@ -1282,9 +1292,33 @@
             expandSummary.textContent = `Typed: ${rawTerms.join(', ')}. Expanded: ${expanded.join(', ')}`;
         }
 
+        // Generate cache key for search requests
+        function getSearchCacheKey(term, cursor, sort) {
+            return `${term}|${cursor || ''}|${sort}`;
+        }
+
+        // Check if cached result is still valid
+        function getCachedSearch(cacheKey) {
+            const cached = searchCache.get(cacheKey);
+            if (!cached) return null;
+            if (Date.now() - cached.timestamp > SEARCH_CACHE_TTL_MS) {
+                searchCache.delete(cacheKey);
+                return null;
+            }
+            return cached.data;
+        }
+
         // Search posts for a single term (server-side proxy)
         async function searchTerm(term, cursor = null, sort = searchSort) {
             const sortValue = sort === 'latest' ? 'latest' : 'top';
+            const cacheKey = getSearchCacheKey(term, cursor, sortValue);
+
+            // Check cache first
+            const cached = getCachedSearch(cacheKey);
+            if (cached) {
+                return cached;
+            }
+
             const params = new URLSearchParams({ term, sort: sortValue });
             if (cursor) {
                 params.set('cursor', cursor);
@@ -1302,11 +1336,16 @@
                 throw new Error(errorMsg);
             }
 
-            return response.json();
+            const data = await response.json();
+
+            // Cache the result
+            searchCache.set(cacheKey, { data, timestamp: Date.now() });
+
+            return data;
         }
 
         // Fetch all posts for a term (with pagination)
-        async function fetchAllPostsForTerm(term, maxPages = 5, sort = searchSort) {
+        async function fetchAllPostsForTerm(term, maxPages = INITIAL_MAX_PAGES, sort = searchSort) {
             let allTermPosts = [];
             let cursor = null;
             let pages = 0;
@@ -1582,6 +1621,12 @@
         }
 
         async function fetchDid(actor) {
+            // Check cache first
+            const cacheKey = actor.toLowerCase();
+            if (didCache.has(cacheKey)) {
+                return didCache.get(cacheKey);
+            }
+
             const response = await fetch(
                 `${PUBLIC_API}/app.bsky.actor.getProfile?actor=${encodeURIComponent(actor)}`
             );
@@ -1593,6 +1638,9 @@
             if (!did) {
                 throw new Error('Could not resolve DID for that handle.');
             }
+
+            // Cache the result
+            didCache.set(cacheKey, did);
             return did;
         }
 
@@ -2472,7 +2520,11 @@
 
         // Main search function
         async function performSearch() {
-            if (isLoading) return;
+            if (isLoading) {
+                pendingSearch = true;
+                return;
+            }
+            pendingSearch = false;
             const termsValue = termsInput.value.trim();
             if (!termsValue) {
                 showStatus('Please enter at least one search term.', 'error');
@@ -2506,10 +2558,11 @@
             try {
                 showStatus(`Searching for: ${rawSearchTerms.join(', ')}...`, 'loading');
 
-                const promises = searchTerms.map(term => fetchAllPostsForTerm(term, 5, searchSort));
+                // Fetch all terms in parallel (Bluesky API doesn't support OR queries)
+                const promises = searchTerms.map(term => fetchAllPostsForTerm(term, INITIAL_MAX_PAGES, searchSort));
                 const results = await Promise.all(promises);
-
                 let combinedPosts = results.flat();
+
                 combinedPosts = deduplicatePosts(combinedPosts);
                 combinedPosts = filterByDate(combinedPosts, timeFilterHours);
                 combinedPosts = filterByLikes(combinedPosts, minLikes);
@@ -2532,6 +2585,10 @@
                 searchBtn.disabled = false;
                 if (autoRefreshEnabled && searchCompleted) {
                     scheduleNextRefresh();
+                }
+                if (pendingSearch) {
+                    pendingSearch = false;
+                    performSearch();
                 }
             }
         }
@@ -2592,7 +2649,10 @@
         }
 
         // Event listeners
-        searchBtn.addEventListener('click', performSearch);
+        searchBtn.addEventListener('click', () => {
+            cancelDebouncedSearch();
+            performSearch();
+        });
         quoteForm.addEventListener('submit', (e) => {
             e.preventDefault();
             performQuoteSearch();
@@ -2639,20 +2699,46 @@
             }
         });
 
+        function debouncedSearch() {
+            if (searchDebounceTimer) {
+                clearTimeout(searchDebounceTimer);
+            }
+            searchDebounceTimer = setTimeout(() => {
+                searchDebounceTimer = null;
+                performSearch();
+            }, SEARCH_DEBOUNCE_MS);
+        }
+
+        function cancelDebouncedSearch() {
+            if (searchDebounceTimer) {
+                clearTimeout(searchDebounceTimer);
+                searchDebounceTimer = null;
+            }
+        }
+
         termsInput.addEventListener('keypress', (e) => {
             if (e.key === 'Enter') {
+                cancelDebouncedSearch();
                 performSearch();
             }
         });
         termsInput.addEventListener('input', () => {
             updateExpansionSummary();
+            if (!termsInput.value.trim()) {
+                cancelDebouncedSearch();
+                pendingSearch = false;
+                return;
+            }
+            debouncedSearch();
         });
 
         minLikesInput.addEventListener('keypress', (e) => {
             if (e.key === 'Enter') {
+                cancelDebouncedSearch();
                 performSearch();
             }
         });
+        minLikesInput.addEventListener('input', debouncedSearch);
         expandTermsToggle.addEventListener('change', () => {
             updateSearchURL();
             updateExpansionSummary();

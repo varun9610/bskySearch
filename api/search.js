@@ -3,8 +3,17 @@ const BSKY_SERVICE = 'https://bsky.social/xrpc';
 const BSKY_HANDLE = process.env.BSKY_HANDLE;
 const BSKY_APP_PASSWORD = process.env.BSKY_APP_PASSWORD;
 
+// Session cache with TTL (2 hours, refresh tokens last longer)
+const SESSION_TTL_MS = 2 * 60 * 60 * 1000;
 let cachedSession = null;
+let sessionCreatedAt = null;
 let sessionPromise = null;
+
+// Search results cache with 30s TTL
+const SEARCH_CACHE_TTL_MS = 30000;
+const SEARCH_CACHE_CLEANUP_INTERVAL_MS = 5000;
+const searchResultsCache = new Map();
+let lastSearchCacheCleanupAt = 0;
 
 function getQueryString(value) {
   if (Array.isArray(value)) {
@@ -55,8 +64,13 @@ async function refreshSession() {
   return response.json();
 }
 
+function isSessionExpired() {
+  if (!cachedSession || !sessionCreatedAt) return true;
+  return Date.now() - sessionCreatedAt > SESSION_TTL_MS;
+}
+
 async function ensureSession() {
-  if (cachedSession) {
+  if (cachedSession && !isSessionExpired()) {
     return cachedSession;
   }
 
@@ -64,6 +78,7 @@ async function ensureSession() {
     sessionPromise = createSession()
       .then((session) => {
         cachedSession = session;
+        sessionCreatedAt = Date.now();
         return session;
       })
       .finally(() => {
@@ -84,20 +99,49 @@ async function refreshOrCreateSession() {
       try {
         const refreshed = await refreshSession();
         cachedSession = refreshed;
+        sessionCreatedAt = Date.now();
         return refreshed;
       } catch (error) {
         cachedSession = null;
+        sessionCreatedAt = null;
       }
     }
 
     const created = await createSession();
     cachedSession = created;
+    sessionCreatedAt = Date.now();
     return created;
   })().finally(() => {
     sessionPromise = null;
   });
 
   return sessionPromise;
+}
+
+// Generate cache key for search results
+function getSearchCacheKey(term, cursor, sort) {
+  return `${term}|${cursor || ''}|${sort}`;
+}
+
+// Get cached search result if valid
+function getCachedSearchResult(cacheKey) {
+  const cached = searchResultsCache.get(cacheKey);
+  if (!cached) return null;
+  if (Date.now() - cached.timestamp > SEARCH_CACHE_TTL_MS) {
+    searchResultsCache.delete(cacheKey);
+    return null;
+  }
+  return cached.data;
+}
+
+// Clean up expired cache entries periodically
+function cleanupSearchCache() {
+  const now = Date.now();
+  for (const [key, value] of searchResultsCache.entries()) {
+    if (now - value.timestamp > SEARCH_CACHE_TTL_MS) {
+      searchResultsCache.delete(key);
+    }
+  }
 }
 
 async function searchPosts(term, cursor, accessJwt, sort) {
@@ -142,7 +186,7 @@ module.exports = async (req, res) => {
     return res.status(400).json({ error: 'Missing term parameter.' });
   }
 
-  if (term.length > 200) {
+  if (term.length > 500) {
     return res.status(400).json({ error: 'Search term is too long.' });
   }
 
@@ -155,6 +199,23 @@ module.exports = async (req, res) => {
   }
 
   const sortValue = sort || 'top';
+  const cacheKey = getSearchCacheKey(term, cursor, sortValue);
+
+  // Check server-side cache first
+  const cachedResult = getCachedSearchResult(cacheKey);
+  if (cachedResult) {
+    return res.status(200).json(cachedResult);
+  }
+
+  // Periodically clean up expired cache entries
+  const now = Date.now();
+  if (
+    searchResultsCache.size > 100 ||
+    now - lastSearchCacheCleanupAt > SEARCH_CACHE_CLEANUP_INTERVAL_MS
+  ) {
+    cleanupSearchCache();
+    lastSearchCacheCleanupAt = now;
+  }
 
   try {
     let session = await ensureSession();
@@ -171,6 +232,9 @@ module.exports = async (req, res) => {
       const message = payload?.message || payload?.error || `Search failed: ${response.status}`;
       return res.status(response.status).json({ error: message });
     }
+
+    // Cache the successful result
+    searchResultsCache.set(cacheKey, { data: payload, timestamp: Date.now() });
 
     return res.status(200).json(payload);
   } catch (error) {
