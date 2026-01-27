@@ -885,6 +885,135 @@
                 flex-wrap: wrap;
             }
         }
+
+        /* Search History Dropdown */
+        .search-input-wrapper {
+            position: relative;
+            width: 100%;
+        }
+
+        .search-input-wrapper input {
+            width: 100%;
+        }
+
+        .search-history-dropdown {
+            position: absolute;
+            top: 100%;
+            left: 0;
+            right: 0;
+            margin-top: 4px;
+            background: var(--card-bg);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            box-shadow: 0 4px 16px var(--shadow);
+            z-index: 100;
+            max-height: 320px;
+            overflow-y: auto;
+            display: none;
+        }
+
+        .search-history-dropdown.visible {
+            display: block;
+        }
+
+        .history-entry {
+            padding: 10px 12px;
+            cursor: pointer;
+            border-bottom: 1px solid var(--border-soft);
+            transition: background 0.15s;
+        }
+
+        .history-entry:last-child {
+            border-bottom: none;
+        }
+
+        .history-entry:hover,
+        .history-entry.selected {
+            background: var(--surface-hover);
+        }
+
+        .history-entry-terms {
+            font-weight: 500;
+            color: var(--text);
+            margin-bottom: 4px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .history-entry-terms span {
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .history-entry-time {
+            font-size: 12px;
+            color: var(--muted-2);
+            white-space: nowrap;
+        }
+
+        .history-entry-meta {
+            font-size: 12px;
+            color: var(--muted);
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+
+        .history-entry-meta span {
+            background: var(--surface);
+            padding: 2px 6px;
+            border-radius: 4px;
+        }
+
+        .history-clear {
+            padding: 10px 12px;
+            color: var(--muted);
+            font-size: 13px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            border-top: 1px solid var(--border);
+            transition: background 0.15s, color 0.15s;
+        }
+
+        .history-clear:hover {
+            background: var(--error-bg);
+            color: var(--error-text);
+        }
+
+        .history-empty {
+            padding: 16px 12px;
+            color: var(--muted);
+            font-size: 13px;
+            text-align: center;
+        }
+
+        .history-entry-delete {
+            opacity: 0;
+            padding: 2px 6px;
+            font-size: 14px;
+            color: var(--muted);
+            background: none;
+            border: none;
+            cursor: pointer;
+            border-radius: 4px;
+            transition: opacity 0.15s, background 0.15s, color 0.15s;
+            flex-shrink: 0;
+        }
+
+        .history-entry:hover .history-entry-delete,
+        .history-entry.selected .history-entry-delete {
+            opacity: 1;
+        }
+
+        .history-entry-delete:hover {
+            background: var(--error-bg);
+            color: var(--error-text);
+        }
     </style>
 </head>
 
@@ -908,7 +1037,10 @@
         <div class="form-row">
             <div class="form-group">
                 <label for="terms">Search Terms (comma-separated)</label>
-                <input type="text" id="terms" placeholder="Enter search terms" />
+                <div class="search-input-wrapper">
+                    <input type="text" id="terms" placeholder="Enter search terms" autocomplete="off" />
+                    <div id="searchHistoryDropdown" class="search-history-dropdown"></div>
+                </div>
             </div>
         </div>
         <div class="form-row">
@@ -1021,6 +1153,11 @@
         const INITIAL_MAX_PAGES = 2;
         const SEARCH_CACHE_TTL_MS = 30000;
 
+        // Search History
+        const HISTORY_STORAGE_KEY = 'bsky-search-history';
+        const HISTORY_MAX_ENTRIES = 50;
+        const HISTORY_VERSION = 1;
+
         // DID cache to avoid duplicate lookups
         const didCache = new Map();
         // Search results cache: key -> { data, timestamp }
@@ -1123,6 +1260,274 @@
             applyThemePreference(savedPreference);
         }
 
+        // Search History Functions
+        function generateHistoryId() {
+            return Date.now().toString(36) + Math.random().toString(36).slice(2, 9);
+        }
+
+        function validateHistoryEntry(entry) {
+            if (!entry || typeof entry !== 'object') return null;
+            const terms = String(entry.terms || '').slice(0, 500).trim();
+            if (!terms) return null;
+            return {
+                id: String(entry.id || '').slice(0, 36) || generateHistoryId(),
+                terms: terms,
+                minLikes: Math.max(0, Math.min(10000, parseInt(entry.minLikes) || 0)),
+                timeFilter: [1, 6, 12, 24, 48, 168].includes(entry.timeFilter) ? entry.timeFilter : 24,
+                sort: ['top', 'latest'].includes(entry.sort) ? entry.sort : 'top',
+                expand: Boolean(entry.expand),
+                timestamp: Number(entry.timestamp) || Date.now(),
+                resultCount: Math.max(0, parseInt(entry.resultCount) || 0)
+            };
+        }
+
+        function loadSearchHistory() {
+            try {
+                const stored = localStorage.getItem(HISTORY_STORAGE_KEY);
+                if (!stored) return [];
+                const parsed = JSON.parse(stored);
+                if (!parsed || parsed.version !== HISTORY_VERSION || !Array.isArray(parsed.entries)) {
+                    return [];
+                }
+                return parsed.entries
+                    .map(validateHistoryEntry)
+                    .filter(Boolean)
+                    .slice(0, HISTORY_MAX_ENTRIES);
+            } catch (e) {
+                console.error('Failed to load search history:', e);
+                return [];
+            }
+        }
+
+        function saveSearchHistory(entries) {
+            try {
+                const data = {
+                    version: HISTORY_VERSION,
+                    entries: entries.slice(0, HISTORY_MAX_ENTRIES)
+                };
+                localStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify(data));
+            } catch (e) {
+                console.error('Failed to save search history:', e);
+            }
+        }
+
+        function addToSearchHistory(entry) {
+            const validated = validateHistoryEntry(entry);
+            if (!validated) return;
+
+            const history = loadSearchHistory();
+            const normalizedTerms = validated.terms.toLowerCase();
+
+            // Remove existing entry with same terms (we'll add updated one at top)
+            const filtered = history.filter(h => h.terms.toLowerCase() !== normalizedTerms);
+
+            // Add new entry at the beginning
+            filtered.unshift(validated);
+
+            // Limit to max entries
+            saveSearchHistory(filtered.slice(0, HISTORY_MAX_ENTRIES));
+        }
+
+        function removeFromSearchHistory(id) {
+            const history = loadSearchHistory();
+            const filtered = history.filter(h => h.id !== id);
+            saveSearchHistory(filtered);
+        }
+
+        function clearSearchHistory() {
+            try {
+                localStorage.removeItem(HISTORY_STORAGE_KEY);
+            } catch (e) {
+                console.error('Failed to clear search history:', e);
+            }
+        }
+
+        function formatHistoryTime(timestamp) {
+            const now = Date.now();
+            const diff = now - timestamp;
+            const minutes = Math.floor(diff / 60000);
+            const hours = Math.floor(diff / 3600000);
+            const days = Math.floor(diff / 86400000);
+
+            if (minutes < 1) return 'just now';
+            if (minutes < 60) return `${minutes}m ago`;
+            if (hours < 24) return `${hours}h ago`;
+            if (days < 7) return `${days}d ago`;
+            return new Date(timestamp).toLocaleDateString();
+        }
+
+        function formatTimeFilter(hours) {
+            if (hours === 1) return '1h';
+            if (hours === 168) return '7d';
+            return `${hours}h`;
+        }
+
+        let historySelectedIndex = -1;
+        let historyDropdownVisible = false;
+
+        function renderSearchHistoryDropdown() {
+            const dropdown = document.getElementById('searchHistoryDropdown');
+            const history = loadSearchHistory();
+            dropdown.textContent = '';
+
+            if (history.length === 0) {
+                const empty = document.createElement('div');
+                empty.className = 'history-empty';
+                empty.textContent = 'No recent searches';
+                dropdown.appendChild(empty);
+                return;
+            }
+
+            history.forEach((entry, index) => {
+                const div = document.createElement('div');
+                div.className = 'history-entry';
+                div.dataset.index = index;
+
+                const termsRow = document.createElement('div');
+                termsRow.className = 'history-entry-terms';
+
+                const termsSpan = document.createElement('span');
+                termsSpan.textContent = entry.terms;
+                termsRow.appendChild(termsSpan);
+
+                const timeSpan = document.createElement('span');
+                timeSpan.className = 'history-entry-time';
+                timeSpan.textContent = formatHistoryTime(entry.timestamp);
+                termsRow.appendChild(timeSpan);
+
+                const deleteBtn = document.createElement('button');
+                deleteBtn.type = 'button';
+                deleteBtn.className = 'history-entry-delete';
+                deleteBtn.textContent = '\u00d7';
+                deleteBtn.title = 'Remove from history';
+                deleteBtn.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    removeFromSearchHistory(entry.id);
+                    renderSearchHistoryDropdown();
+                });
+                termsRow.appendChild(deleteBtn);
+
+                div.appendChild(termsRow);
+
+                const metaRow = document.createElement('div');
+                metaRow.className = 'history-entry-meta';
+
+                const likesSpan = document.createElement('span');
+                likesSpan.textContent = `${entry.minLikes}+ likes`;
+                metaRow.appendChild(likesSpan);
+
+                const timeFilterSpan = document.createElement('span');
+                timeFilterSpan.textContent = formatTimeFilter(entry.timeFilter);
+                metaRow.appendChild(timeFilterSpan);
+
+                const sortSpan = document.createElement('span');
+                sortSpan.textContent = entry.sort;
+                metaRow.appendChild(sortSpan);
+
+                if (entry.expand) {
+                    const expandSpan = document.createElement('span');
+                    expandSpan.textContent = 'expanded';
+                    metaRow.appendChild(expandSpan);
+                }
+
+                if (entry.resultCount > 0) {
+                    const resultsSpan = document.createElement('span');
+                    resultsSpan.textContent = `${entry.resultCount} results`;
+                    metaRow.appendChild(resultsSpan);
+                }
+
+                div.appendChild(metaRow);
+
+                div.addEventListener('click', () => {
+                    applyHistoryEntry(entry);
+                    hideSearchHistoryDropdown();
+                });
+
+                dropdown.appendChild(div);
+            });
+
+            // Clear history button
+            const clearBtn = document.createElement('div');
+            clearBtn.className = 'history-clear';
+            const trashIcon = document.createElement('span');
+            trashIcon.textContent = '\ud83d\uddd1';
+            clearBtn.appendChild(trashIcon);
+            clearBtn.appendChild(document.createTextNode(' Clear search history'));
+            clearBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                if (confirm('Clear all search history?')) {
+                    clearSearchHistory();
+                    hideSearchHistoryDropdown();
+                }
+            });
+            dropdown.appendChild(clearBtn);
+        }
+
+        function applyHistoryEntry(entry) {
+            termsInput.value = entry.terms;
+            minLikesInput.value = entry.minLikes;
+            timeFilterSelect.value = entry.timeFilter;
+            sortSelect.value = entry.sort;
+            expandTermsToggle.checked = entry.expand;
+            searchSort = entry.sort;
+            updateExpansionSummary();
+            performSearch(true);
+        }
+
+        function showSearchHistoryDropdown() {
+            const dropdown = document.getElementById('searchHistoryDropdown');
+            renderSearchHistoryDropdown();
+            dropdown.classList.add('visible');
+            historyDropdownVisible = true;
+            historySelectedIndex = -1;
+        }
+
+        function hideSearchHistoryDropdown() {
+            const dropdown = document.getElementById('searchHistoryDropdown');
+            dropdown.classList.remove('visible');
+            historyDropdownVisible = false;
+            historySelectedIndex = -1;
+        }
+
+        function updateHistorySelection(index) {
+            const dropdown = document.getElementById('searchHistoryDropdown');
+            const entries = dropdown.querySelectorAll('.history-entry');
+            entries.forEach((el, i) => {
+                el.classList.toggle('selected', i === index);
+            });
+            if (index >= 0 && entries[index]) {
+                entries[index].scrollIntoView({ block: 'nearest' });
+            }
+        }
+
+        function handleHistoryKeydown(e) {
+            if (!historyDropdownVisible) return;
+
+            const history = loadSearchHistory();
+            if (history.length === 0) return;
+
+            if (e.key === 'ArrowDown') {
+                e.preventDefault();
+                historySelectedIndex = Math.min(historySelectedIndex + 1, history.length - 1);
+                updateHistorySelection(historySelectedIndex);
+            } else if (e.key === 'ArrowUp') {
+                e.preventDefault();
+                historySelectedIndex = Math.max(historySelectedIndex - 1, -1);
+                updateHistorySelection(historySelectedIndex);
+            } else if (e.key === 'Enter' && historySelectedIndex >= 0) {
+                e.preventDefault();
+                applyHistoryEntry(history[historySelectedIndex]);
+                hideSearchHistoryDropdown();
+            } else if (e.key === 'Escape') {
+                hideSearchHistoryDropdown();
+            } else if (e.key === 'Delete' && historySelectedIndex >= 0) {
+                e.preventDefault();
+                removeFromSearchHistory(history[historySelectedIndex].id);
+                renderSearchHistoryDropdown();
+                historySelectedIndex = Math.min(historySelectedIndex, loadSearchHistory().length - 1);
+                updateHistorySelection(historySelectedIndex);
+            }
+        }
 
         function updateURLWithParams(params) {
             const newURL = window.location.pathname + (params.toString() ? '?' + params.toString() : '');
@@ -2519,7 +2924,9 @@
         }
 
         // Main search function
-        async function performSearch() {
+        async function performSearch(saveToHistory = true) {
+            hideSearchHistoryDropdown();
+
             if (isLoading) {
                 pendingSearch = true;
                 return;
@@ -2573,6 +2980,19 @@
                 lastRefreshError = null;
                 searchCompleted = true;
                 updateRefreshMeta();
+
+                // Save to history on successful user-initiated search
+                if (saveToHistory) {
+                    addToSearchHistory({
+                        terms: termsValue,
+                        minLikes: minLikes,
+                        timeFilter: timeFilterHours,
+                        sort: searchSort,
+                        expand: expandTermsToggle.checked,
+                        timestamp: Date.now(),
+                        resultCount: allPosts.length
+                    });
+                }
 
                 hideStatus();
                 renderResults();
@@ -2717,7 +3137,7 @@
         }
 
         termsInput.addEventListener('keypress', (e) => {
-            if (e.key === 'Enter') {
+            if (e.key === 'Enter' && historySelectedIndex < 0) {
                 cancelDebouncedSearch();
                 performSearch();
             }
@@ -2730,6 +3150,24 @@
                 return;
             }
             debouncedSearch();
+        });
+
+        // Search history dropdown events
+        termsInput.addEventListener('focus', () => {
+            const history = loadSearchHistory();
+            if (history.length > 0) {
+                showSearchHistoryDropdown();
+            }
+        });
+
+        termsInput.addEventListener('keydown', handleHistoryKeydown);
+
+        // Close dropdown when clicking outside
+        document.addEventListener('click', (e) => {
+            const wrapper = document.querySelector('.search-input-wrapper');
+            if (wrapper && !wrapper.contains(e.target)) {
+                hideSearchHistoryDropdown();
+            }
         });
 
         minLikesInput.addEventListener('keypress', (e) => {
